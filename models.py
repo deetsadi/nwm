@@ -67,20 +67,20 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq)
         return t_emb
 
-# class ActionEmbedder(nn.Module):
-#     """
-#     Embeds action into vector representations.
-#     """
-#     def __init__(self, d_action, d_model):
-#         super().__init__()
-#         self.mlp = nn.Sequential(
-#             nn.Linear(d_action, d_model, bias=True),
-#             nn.SiLU(),
-#             nn.Linear(d_model, d_model, bias=True),
-#         )
+class ActionEmbedderMLP(nn.Module):
+    """
+    Embeds action into vector representations.
+    """
+    def __init__(self, d_action, d_model):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(d_action, d_model, bias=True),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model, bias=True),
+        )
 
-#     def forward(self, actions):
-#         return self.mlp(actions)
+    def forward(self, actions):
+        return self.mlp(torch.mean(actions, dim=1))
     
 # class ActionEmbedder(nn.Module):
 #     """
@@ -109,11 +109,11 @@ class TimestepEmbedder(nn.Module):
 
 #         return x[:, 0]
 
-class ActionEmbedder(nn.Module):
+class ActionEmbedderTransformer(nn.Module):
     """
     Embeds action into vector representations.
     """
-    def __init__(self, d_action, d_model, n_heads=8, n_layers=2, max_seq_len=100, hidden_dim=512):
+    def __init__(self, d_action, d_model, n_heads=8, n_layers=8, max_seq_len=100, hidden_dim=512):
         super().__init__()
         self.embedding = nn.Linear(d_action, hidden_dim)
         self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, hidden_dim))
@@ -144,15 +144,87 @@ class ActionEmbedder(nn.Module):
 
         return self.proj(x[:, 0])
 
+class ActionEmbedder(nn.Module):
+    def __init__(self, d_action, d_model, embedder_type='mlp'):
+        super().__init__()
+        if embedder_type == 'transformer':
+            self.embedder = ActionEmbedderTransformer(d_action, d_model)
+        else:
+            self.embedder = ActionEmbedderMLP(d_action, d_model)
+    
+    def forward(self, actions):
+        return self.embedder(actions)
+
+class ActionEncoder(nn.Module):
+    """
+    Embeds action into vector representations.
+    """
+    def __init__(self, d_action, d_model, n_heads=8, n_layers=8, max_seq_len=100, hidden_dim=512):
+        super().__init__()
+        self.embedding = nn.Linear(d_action, hidden_dim)
+        self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, hidden_dim))
+        enc_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=n_heads, batch_first=True, norm_first=True)
+        self.enc = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+
+        self.proj = nn.Linear(hidden_dim, d_model)
+
+    def forward(self, actions):
+        B, T, _ = actions.shape
+
+        action_mask = (actions == -100).any(dim=-1)
+        src_key_padding_mask = action_mask
+
+        x = self.embedding(actions) + self.pos_emb[:, :actions.size(1), :]
+        x = self.enc(x, src_key_padding_mask=src_key_padding_mask)
+
+        return self.proj(x)
+
 #################################################################################
 #                                 Core CDiT Model                                #
 #################################################################################
+
+# class CDiTBlock(nn.Module):
+#     """
+#     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+#     """
+#     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+#         super().__init__()
+#         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+#         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         self.norm_cond = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         self.cttn = nn.MultiheadAttention(hidden_size, num_heads=num_heads, add_bias_kv=True, bias=True, batch_first=True, **block_kwargs)
+#         self.adaLN_modulation = nn.Sequential(
+#             nn.SiLU(),
+#             nn.Linear(hidden_size, 11 * hidden_size, bias=True)
+#         )
+#         # self.adaLN_modulation_goal = nn.Sequential(
+#         #     nn.SiLU(),
+#         #     nn.Linear(hidden_size, 9 * hidden_size, bias=True)
+#         # )
+#         # self.adaLN_modulation_context = nn.Sequential(
+#         #     nn.SiLU(),
+#         #     nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+#         # )
+
+#         self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+#         mlp_hidden_dim = int(hidden_size * mlp_ratio)
+#         approx_gelu = lambda: nn.GELU(approximate="tanh")
+#         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+
+#     def forward(self, x, c, x_cond):
+#         shift_msa, scale_msa, gate_msa, shift_ca_xcond, scale_ca_xcond, shift_ca_x, scale_ca_x, gate_ca_x, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(11, dim=-1)
+#         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+#         x_cond_norm = modulate(self.norm_cond(x_cond), shift_ca_xcond, scale_ca_xcond)
+#         x = x + gate_ca_x.unsqueeze(1) * self.cttn(query=modulate(self.norm2(x), shift_ca_x, scale_ca_x), key=x_cond_norm, value=x_cond_norm, need_weights=False)[0]
+#         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm3(x), shift_mlp, scale_mlp))
+#         return x
 
 class CDiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, act_block = True, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
@@ -171,18 +243,26 @@ class CDiTBlock(nn.Module):
         #     nn.SiLU(),
         #     nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         # )
+        if act_block:
+            self.cttn_act = nn.MultiheadAttention(hidden_size, num_heads=num_heads, add_bias_kv=True, bias=True, batch_first=True, **block_kwargs)
+            self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=True, eps=1e-6)
 
-        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm4 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
 
-    def forward(self, x, c, x_cond):
+    def forward(self, x, c, x_cond, act=None):
         shift_msa, scale_msa, gate_msa, shift_ca_xcond, scale_ca_xcond, shift_ca_x, scale_ca_x, gate_ca_x, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(11, dim=-1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x_cond_norm = modulate(self.norm_cond(x_cond), shift_ca_xcond, scale_ca_xcond)
         x = x + gate_ca_x.unsqueeze(1) * self.cttn(query=modulate(self.norm2(x), shift_ca_x, scale_ca_x), key=x_cond_norm, value=x_cond_norm, need_weights=False)[0]
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm3(x), shift_mlp, scale_mlp))
+
+        if act is not None:
+            act_mask = (act == -100).any(dim=-1)  # (B, T_act)
+            x = x + self.cttn_act(self.norm3(x), act, act, key_padding_mask=act_mask)[0]  # cross-attn with mask
+
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm4(x), shift_mlp, scale_mlp))
         return x
 
 class FinalLayer(nn.Module):
@@ -221,6 +301,7 @@ class CDiT(nn.Module):
         num_heads=16,
         mlp_ratio=4.0,
         learn_sigma=True,
+        act_block=True
     ):
         super().__init__()
         self.context_size = context_size
@@ -232,12 +313,17 @@ class CDiT(nn.Module):
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = ActionEmbedder(action_size, hidden_size)
+
+        self.act_block = act_block
+        if self.act_block:
+            self.action_encoder = ActionEncoder(action_size, hidden_size)
         num_patches = self.x_embedder.num_patches
 
         self.pos_embed = nn.Parameter(torch.zeros(self.context_size + 1, num_patches, hidden_size), requires_grad=True) # for context and for predicted frame
         # self.pos_embed_act = nn.Parameter(torch.zeros(self.context_size, action_size), requires_grad=True)
 
-        self.blocks = nn.ModuleList([CDiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)])
+        self.blocks = nn.ModuleList([CDiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, act_block=act_block) for _ in range(depth)])
+
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.time_embedder = TimestepEmbedder(hidden_size)
         self.initialize_weights()
@@ -262,10 +348,12 @@ class CDiT(nn.Module):
 
 
         # Initialize action embedding:
-        # nn.init.normal_(self.y_embedder.mlp[0].weight, std=0.02)
-        # nn.init.normal_(self.y_embedder.mlp[2].weight, std=0.02)
-        nn.init.normal_(self.y_embedder.pos_emb, std=0.02)
-        nn.init.normal_(self.y_embedder.cls_token, std=0.02)
+        if self.act_block:
+            nn.init.normal_(self.y_embedder.embedder.mlp[0].weight, std=0.02)
+            nn.init.normal_(self.y_embedder.embedder.mlp[2].weight, std=0.02)
+        else:
+            nn.init.normal_(self.y_embedder.embedder.pos_emb, std=0.02)
+            nn.init.normal_(self.y_embedder.embedder.cls_token, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -315,13 +403,16 @@ class CDiT(nn.Module):
         x_cond = self.x_embedder(x_cond.flatten(0, 1)).unflatten(0, (x_cond.shape[0], x_cond.shape[1])) + self.pos_embed[:self.context_size]  # (N, T, D), where T = H * W / patch_size ** 2.flatten(1, 2)
         x_cond = x_cond.flatten(1, 2)
         t = self.t_embedder(t[..., None])
-        y = self.y_embedder(y)
+        y_pooled = self.y_embedder(y)
         time_emb = self.time_embedder(rel_t[..., None])
 
-        c = t + time_emb + y # if training on unlabeled data, dont add y.
+        c = t + time_emb + y_pooled # if training on unlabeled data, dont add y.
+
+        if self.act_block:
+            y = self.action_encoder(y)
 
         for block in self.blocks:
-            x = block(x, c, x_cond)
+            x = block(x, c, x_cond, act=y)
         x = self.final_layer(x, c)
         x = self.unpatchify(x)
         return x
